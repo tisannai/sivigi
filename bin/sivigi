@@ -1,0 +1,2297 @@
+#!/usr/bin/env ruby
+
+require 'como'
+include Como
+
+require 'matrix'
+require 'geometry'
+require 'numeric_ext'
+
+
+# Acronyms:
+# * :u - up
+# * :d - down
+# * :l - left
+# * :r - right
+# * :c - center
+# * :v - vertical
+# * :h - horizontal
+
+
+Spec.command( 'sivigi', 'Tero Isannainen', '2017',
+    [
+        [ :opt_single, 'file',   '-f', "Sivigi file (default: stdin)." ],
+        [ :opt_single, 'name',   '-n', "Sivigi header (default: stdin)." ],
+        [ :opt_single, 'size',   '-s', "Size of figure (option for Figure scaling percentage." ],
+        [ :opt_single, 'zoom',   '-z', "Figure scaling percentage." ],
+        [ :switch,     'module', '-m', "Disable auto Figure module include." ],
+        [ :opt_any,    'output', '-o', "Output file (default: base of sivigi file)." ],
+        # TODO:
+        #        [ :exclusive,  'doc',    '-d', "User documentation." ],
+    ] )
+
+
+# ------------------------------------------------------------
+# Extensions to core classes.
+# ------------------------------------------------------------
+
+
+class Object
+
+    # Add deep copy methods to all objects.
+    def deep_copy
+        Marshal.load( Marshal.dump( self ) )
+    end
+
+    # Create scope for self reference.
+    #
+    # @return [Object] Self.
+    def with!( &blk )
+        self.instance_eval &blk
+        self
+    end
+
+    # Create scope for self reference with return value.
+    #
+    # @return [Object] Value of block.
+    def with( &blk )
+        # blk[ self ]
+        self.instance_eval &blk
+    end
+
+end
+
+
+# Support for primitive number regarding Coord lazy evaluation.
+class Numeric
+    def value()   self; end
+    def revalue() self; end
+    def resolve() self; end
+end
+
+
+class Float
+
+    # Round and convert to Integer.
+    def to_ri
+        self.round.to_i
+    end
+end
+
+
+module Geometry
+
+    class Point
+
+        # Convert Point to Vector. If peer is given, Vector is from
+        # self to peer.
+        def to_vec( peer = nil )
+            if peer
+                Gvec[ peer.x - self.x, peer.y - self.y ]
+            else
+                Gvec[ self.x, self.y ]
+            end
+        end
+    end
+
+
+    class Vector
+
+        alias length modulus
+
+        # Unit vector.
+        def unit
+            self.dup * (1.0 / self.modulus )
+        end
+
+        # Offset vector length.
+        def adjust_len( diff )
+            self.unit * ( self.length + diff )
+        end
+
+        # Half vector.
+        def half
+            self.unit * ( self.length / 2 )
+        end
+
+        # Vector angle in radians.
+        def rad
+            x = self[0]
+            y = self[1]
+            if x >= 0 && y >= 0
+                Math.atan( y.to_f/x )
+            elsif x < 0 && y >= 0
+                Math::PI + Math.atan( y.to_f/x )
+            elsif x < 0 && y < 0
+                Math::PI + Math.atan( y.to_f/x )
+            else
+                2*Math::PI + Math.atan( y.to_f/x )
+            end
+        end
+
+        # Vector angle in degrees.
+        def angle
+            rad / Math::PI * 180
+        end
+
+        # Vector angle in degress clockwise.
+        def anglecw
+            360 - angle
+        end
+
+        # Rotate vector by angle (rad).
+        def rotate( rad )
+            ca = Math.cos( rad )
+            sa = Math.sin( rad )
+            Vector[ ca*x - sa*y, sa*x + ca*y ]
+        end
+
+        # Convert vec to Pos.
+        def to_pos
+            Sivigi::Pos.ini( *self.to_a )
+        end
+
+        # Convert vec to Gpos.
+        def to_gpos
+            Point[ self.x, self.y ]
+        end
+
+    end
+
+    class Segment
+
+        # Segment from Sivigi::Pos.
+        def Segment.new_by_pos( p1, p2 )
+            Segment.new_by_arrays( p1.to_a, p2.to_a )
+        end
+
+    end
+
+end
+
+
+# Short versions of Geometry classes.
+
+class Gpos    < Geometry::Point; end
+class Gline   < Geometry::Line; end
+class Gseg    < Geometry::Segment; end
+class Gvec    < Geometry::Vector; end
+
+
+
+# ------------------------------------------------------------
+# Sivigi module.
+# ------------------------------------------------------------
+
+
+module Sivigi
+
+    UNIT        = 'mm'
+    INDENT_STEP = 2
+
+    # Postpone the evaluation for value, so that references can first
+    # be setup, then values propagated to all targets.
+    class Defer
+
+        def initialize( obj, met, *args )
+            @obj = obj
+            @met = met
+            @args = *args
+            @value = nil
+        end
+
+        def value
+            if @value
+                @value
+            else
+                @value = @obj.send( @met, *@args )
+            end
+        end
+
+        def revalue
+            @value = nil
+        end
+
+    end
+
+
+    # Common feature for all.
+    module Atoms
+
+        PI = Math::PI
+
+        def dup
+            self.deep_copy
+        end
+
+        def dup!( &blk )
+            obj = self.dup
+            obj.instance_eval &blk if blk
+            obj
+        end
+
+    end
+
+
+    # One coordinate with lazy evaluation.
+    class Coord
+
+        include Atoms
+
+        # Coord type: abs/rel.
+        attr_reader :rel
+
+        # Operations to get the final value.
+        attr_reader :ops
+
+
+        def Coord.abs( val )
+            Coord.new( val, false )
+        end
+
+        def Coord.rel( val )
+            Coord.new( val, true )
+        end
+
+        def Coord.set( val )
+            if val.kind_of? Numeric
+                Coord.new( val, false )
+            else
+                Coord.new( val, true )
+            end
+        end
+
+
+        def initialize( val, rel = false )
+            @rel = rel
+
+            if @rel
+                @ops = [ [ :rel, val ] ]
+            else
+                @ops = [ [ :abs, val ] ]
+            end
+
+            @value = nil
+        end
+
+
+        # Return reference (relative) to self.
+        def ref
+            Coord.rel( self )
+        end
+
+
+        # Calculate with op and args.
+        def calculate( op, a1, a2 = nil )
+            case op
+            when :abs; a2
+            when :rel; a2
+            when :mul; a1 * a2
+            when :add; a1 + a2
+            when :sub; a1 - a2
+            when :inv; a1 * -1
+            else 0
+            end
+        end
+
+
+        # Perform operation with op and val to self.
+        def operate( op, val = nil )
+            case val
+            when Coord
+                @rel |= true
+                @ops.push [ op, val ]
+            when Numeric, NilClass
+                if @rel == false
+                    @ops[-1][1] = calculate( op, @ops[-1][1], val )
+                else
+                    @ops.push [ op, val ]
+                end
+            end
+        end
+
+        def mul( val ) operate( :mul, val ); self; end
+        def add( val ) operate( :add, val ); self; end
+        def sub( val ) operate( :sub, val ); self; end
+        def inv( val = nil ) operate( :inv, nil ); self; end
+
+        alias scale mul
+
+        # Memoize value and update if needed.
+        def value
+            if @value
+                @value
+            else
+                @value = resolve( :value )
+            end
+        end
+
+        # Un-memoize value, i.e. allow new resolve.
+        def revalue
+            @value = nil
+            @ops.each do |v|
+                v[1].revalue
+            end
+        end
+
+        # Resolve the list of operations.
+        def resolve( method = :resolve )
+            val = 0
+            @ops.each do |v|
+                val = calculate( v[0], val, v[1].send( method ) )
+            end
+            val
+        end
+
+        # Marshal only ops, since value will be resolved anyhow.
+        def marshal_dump
+            [ @ops, @rel ]
+        end
+
+        # Marshal load only ops, and reset value to nil.
+        def marshal_load( data )
+            @value = nil
+            @ops = data[0]
+            @rel = data[1]
+        end
+
+    end
+
+
+    # Position (x,y) in coordinate system with lazy evaluation.
+    class Pos
+
+        include Atoms
+
+        # Constuctors:
+
+        # Create pos with any of the posible argument variations.
+        def Pos.set( *pos )     Pos.new.set( *pos ); end
+
+        # Create pos with dir and length.
+        def Pos.dir( dir, len ) Pos.new.dir( dir, len ); end
+
+        # Create pos directly with x, y.
+        def Pos.ini( x, y )     Pos.new.ini( x, y ); end
+
+        # Create pos with x=x, y=0.
+        def Pos.x( x ) Pos.new( Coord.set( x ), Coord.set( 0 ) ); end
+
+        # Create pos with x=0, y=y.
+        def Pos.x( y ) Pos.new( Coord.set( 0 ), Coord.set( y ) ); end
+
+        def Pos.abs( x, y ) Pos.new( Coord.abs( x ), Coord.abs( y ) ); end
+
+
+        # Initialize, and default to nil for x, y.
+        def initialize( x = nil, y = nil )
+            @x = x
+            @y = y
+        end
+
+        # Set position value.
+        #
+        # Options:
+        #   a.set 2,3            # List (x,y)
+        #   a.set Pos.new(2,3)   # Other Pos
+        #   a.set [2,3]          # Array (x,y)
+        #   a.set :l, 2          # Dir dir, len
+        def set( *pos )
+            if pos.length > 1
+                if pos[0].kind_of? Symbol
+                    self.dir( *pos )
+                else
+                    @x = Coord.set( pos[0] )
+                    @y = Coord.set( pos[1] )
+                end
+            else
+                pos = pos[0]
+                if pos.kind_of? Pos
+                    @x, @y = pos.xref, pos.yref
+                else
+                    @x = Coord.set( pos[0] )
+                    @y = Coord.set( pos[1] )
+                end
+            end
+            self
+        end
+
+        # Create pos per direction and length (distance).
+        def dir( dir, len )
+            case dir
+            when :u; self.ini( 0, -len )
+            when :r; self.ini( len, 0 )
+            when :d; self.ini( 0, len )
+            when :l; self.ini( -len, 0 )
+            else; raise RuntimeError, "Unknown dir: #{dir}"
+            end
+        end
+
+        # Initialize x, y to Coord.
+        def ini( x, y )
+            @x = Coord.set( x )
+            @y = Coord.set( y )
+            self
+        end
+
+        # Memoize/evaluate pos.
+        def value
+            @x.value
+            @y.value
+            self
+        end
+
+        # Revalue pos.
+        def revalue
+            @x.revalue
+            @y.revalue
+            self
+        end
+
+        # Return reference to pos.
+        def ref
+            Pos.new( self.xref.ref, self.yref.ref )
+        end
+
+        # Get reference to x.
+        def xref() @x end
+        # Get reference to y.
+        def yref() @y end
+
+        # Set x value.
+        def xset( val ) @x = val; self end
+        # Set y value.
+        def yset( val ) @y = val; self end
+
+        # Memoize/evaluate x and return it.
+        def x!() @x.value end
+        # Memoize/evaluate y and return it.
+        def y!() @y.value end
+
+        # Get x without memoize.
+        def x() @x.resolve end
+        # Get y without memoize.
+        def y() @y.resolve end
+
+        alias xnow x
+        alias ynow y
+
+        # Duplicate x.
+        def xdup() @x.dup end
+        # Duplicate y.
+        def ydup() @y.dup end
+
+        # Get pos without memoize.
+        def now
+            ret = self.dup
+            ret.xset self.x
+            ret.yset self.y
+            ret
+        end
+
+        # Scale pos with val (scalar).
+        def mul( val )
+            @x.scale( val )
+            @y.scale( val )
+            self
+        end
+
+        alias scale mul
+
+        # Add pos to self.
+        def add( *pos )
+            off = Pos.set( *pos )
+            @x.add( off.xref )
+            @y.add( off.yref )
+            self
+        end
+
+        # Sub pos from self.
+        def sub( *pos )
+            off = Pos.set( *pos )
+            @x.sub( off.xref )
+            @y.sub( off.yref )
+            self
+        end
+
+        # Inv pos.
+        def inv
+            @x.inv
+            @y.inv
+            self
+        end
+
+        # Add to pos x.
+        def xadd( off )
+            @x.add( off )
+            self
+        end
+
+        # Sub from pos x.
+        def xsub( off )
+            @x.sub( off )
+            self
+        end
+
+        # Inv pos x.
+        def xinv
+            @x.inv
+            self
+        end
+
+        # Add to pos y.
+        def yadd( off )
+            @y.add( off )
+            self
+        end
+
+        # Sub from pos y.
+        def ysub( off )
+            @y.sub( off )
+            self
+        end
+
+        # Inv pos y.
+        def yinv
+            @y.inv
+            self
+        end
+
+        alias ox xadd
+        alias oy yadd
+        alias o  add
+        alias +  add
+        alias -  sub
+
+        # To array (without memoize).
+        def to_a
+            [ xnow, ynow ]
+        end
+
+        # To string (without memoize). Note: uses SVG required format.
+        def to_s
+            "#{xnow},#{ynow}"
+        end
+
+        # To Gpos conversion.
+        def to_gpos
+            Geometry::Point.new( xnow, ynow )
+        end
+
+        # To Gvec conversion.
+        def to_vec( peer = nil )
+            if peer
+                Gvec[ peer.xnow - self.xnow, peer.ynow - self.ynow ]
+            else
+                Gvec[ self.xnow, self.ynow ]
+            end
+        end
+
+        # Move peer away from self if len is positive and towards self
+        # if negative.
+        def offset_peer( peer, len )
+            v1 = to_vec( peer )
+            v2 = v1.adjust_len( len )
+            self.dup + v2.to_pos
+        end
+
+        # Move self towards peer if len is positive and away if
+        # negative.
+        def offset_self( peer, len )
+            v1 = to_vec( peer )
+            v2 = v1.adjust_len( len )
+            peer.dup - v2.to_pos
+        end
+
+    end
+
+
+    # Object size.
+    class Size < Pos; end
+
+
+    # Common features for other classes.
+    class Common
+
+        include Atoms
+
+        @@outfile = "<stdout>"
+        @@fh = STDOUT
+        @@outind = 0
+
+        @@figure = nil
+        @@container = []
+        @@layer = nil
+
+        @@color_map = {
+            :black => "#000000",
+            :white => "#ffffff",
+            :gray  => "#888888",
+        }
+
+        # Contained items.
+        attr_reader :items
+
+        # Create and init.
+        def Common.ini( *args ) self.new( *args ) end
+
+        # Create and draw with block.
+        def Common.draw( &blk )
+            o = self.new
+            o.draw( &blk )
+            o
+        end
+
+        # Set/get layer system.
+        def Common.layer( layer = nil )
+            if layer
+                @@layer = layer
+            else
+                @@layer
+            end
+        end
+
+        # Set/get layer system.
+        def Common.figure( figure = nil )
+            if figure
+                raise RuntimeError, "Cant create figure twice!" if @@figure
+                @@figure = figure
+            else
+                @@figure
+            end
+        end
+
+        # Draw (register to be drawed) with block.
+        def draw( &blk )
+            register
+            instance_eval &blk if blk
+            self
+        end
+
+        # Create base for Drawables.
+        def Common.base( &blk )
+            o = self.new
+            o.visible false
+            o.instance_eval &blk if blk
+            o
+        end
+
+        # Create without drawing with block.
+        def Common.create( &blk )
+            o = self.new
+            o.instance_eval &blk if blk
+            o
+        end
+
+        def Common.outfile( outfile = nil )
+            @@outfile = outfile if outfile
+            @@outfile
+        end
+
+        # Add container, i.e. start using new.
+        def Common.contain( c )
+            @@container.push c
+        end
+
+        # Remove container, i.e. revert to previous.
+        def Common.uncontain
+            @@container.pop
+        end
+
+        def Common.container
+            @@container[-1]
+        end
+
+        def Common.openOutput
+            unless @@outfile == "<stdout>"
+                @@fh = File.open( @@outfile, 'w' )
+            end
+        end
+
+        def Common.closeOutput
+            unless @@outfile == "<stdout>"
+                @@fh.close
+            end
+        end
+
+        # Duplicate and register only if already registered.
+        def clone
+            dup
+        end
+
+        # Output without indent change.
+        def outo( str )
+            outi nil, str
+        end
+
+        # Set output line indent. Return Array with tuplet: indent
+        # before output and after output (new indent level).
+        def setind( ind )
+
+            preind = @@outind
+            postind = @@outind
+
+            if ind == nil
+            # Do nothing
+            elsif ind[0] == '-'
+                preind -= ind[1..-1].to_i
+            elsif ind[0] == '+'
+                preind += ind[1..-1].to_i
+            elsif ind[-1] == '-'
+                postind -= ind[0..-2].to_i
+            elsif ind[-1] == '+'
+                postind += ind[0..-2].to_i
+            end
+
+            [ preind, postind ]
+        end
+
+        # Output with indent change.
+        def outi( ind, str )
+            ind = setind( ind )
+            @@fh.write( ' ' * ind[0] )
+            @@fh.puts( str )
+            @@outind = ind[1]
+        end
+
+        # Increament indent.
+        def incind( ind = INDENT_STEP )
+            @@outind += ind
+        end
+
+        # Decrement indent.
+        def decind( ind = INDENT_STEP )
+            @@outind -= ind
+        end
+
+
+        # Register item to the item container. Items are drawn.
+        def Common.register( item )
+            if Common.container == nil
+                # Do nothing ...
+                true
+            else
+                Common.container.items.push item
+            end
+        end
+
+
+        # Create a method that return property value if no args and
+        # sets the property value directly if args are given.
+        #
+        # Example:
+        #
+        #    property( :visible )
+        #
+        # is same as:
+        #
+        #    def visible( *val )
+        #        if val.length == 0
+        #            @visible
+        #        else
+        #            @visible = val[0]
+        #            self
+        #        end
+        #    end
+        #
+        def self.property( *names )
+            names.each do |name|
+                define_method( name ) do |*args|
+                    var = "@"+name.to_s
+                    if args.length == 0
+                        instance_variable_get( var )
+                    else
+                        instance_variable_set( var, args[0] )
+                        self
+                    end
+                end
+            end
+        end
+
+
+        # Create a method that return property value if no args and
+        # sets the property value with set method if args are given.
+        #
+        # Example:
+        #
+        #    property_set( :pos )
+        #
+        # is same as:
+        #
+        #    def pos( *val )
+        #        if val.length == 0
+        #            @pos
+        #        else
+        #            @pos.set *val
+        #            self
+        #        end
+        #    end
+        #
+        def self.property_set( *names )
+            names.each do |name|
+                define_method( name ) do |*args|
+                    var = "@"+name.to_s
+                    if args.length == 0
+                        instance_variable_get( var )
+                    else
+                        instance_variable_get( var ).send( :set, *args )
+                        self
+                    end
+                end
+            end
+        end
+
+    end
+
+
+    # Layer are drawn in order. User can select the drawing order.
+    class Layer < Common
+
+        attr_reader :list
+
+        # Return layer system (object).
+        def Layer.system
+            @@layer
+        end
+
+        def initialize
+            # Ordered list of layers to draw.
+            @list = [ :default ]
+            # Temporary use layer.
+            @stack = []
+            @use = nil
+        end
+
+        # Get index of layer or create the layer if not existing.
+        def getidx( layer )
+            if ( index = @list.index( layer ) )
+                index
+            else
+                @list.push( layer )
+                @list.length-1
+            end
+        end
+
+        # Insert layer before ref.
+        def prepend( ref, layer )
+            idx = getidx( ref )
+            @list.insert( idx, layer )
+        end
+
+        # Insert layer after ref.
+        def append( ref, layer )
+            idx = getidx( ref )
+            @list.insert( idx+1, layer )
+        end
+
+        # Add layer to list (end).
+        def add( *layer )
+            if not( layer.kind_of? Array )
+                layer = [ layer ]
+            end
+            layer.each do |l|
+                getidx( l )
+            end
+        end
+
+        # Use layer.
+        def use( layer )
+            getidx( layer )
+            @use = layer
+        end
+
+        # Revert to default layer.
+        def unuse
+            @use = nil
+        end
+
+        # Add/use layer and use it temporarely.
+        def push( layer )
+            getidx( layer )
+            @stack.push layer
+        end
+
+        # Stop using temporary layer.
+        def pop
+            @stack.pop
+        end
+
+        # Get currently used layer.
+        def current
+            if @stack.any?
+                @stack[-1]
+            elsif @use
+                @use
+            else
+                @list[-1]
+            end
+        end
+
+    end
+
+
+    # Element is part of the figure creation.
+    class Element < Common
+
+        attr_accessor :container
+
+        self.property( :visible, :layer )
+
+        def initialize
+            @container = nil
+            @visible = true
+            @layer = nil
+        end
+
+        # Register self, i.e. mark to be drawed.
+        def register
+            @container = Common.container
+            # layer @container.layer
+            layer Layer.system.current
+            Common.register( self )
+            self
+        end
+
+        # Duplicate and register.
+        def dup
+            ret = self.deep_copy
+            ret.register
+            ret.visible true
+            ret
+        end
+
+    end
+
+
+    # Base object for drawables.
+    class Drawable < Element
+
+        LINEWIDTH = 1
+        DOTSIZE   = LINEWIDTH*4
+
+        self.property( :unit, :linewidth, :linestyle, :font, :fontsize, :fillcolor )
+
+
+        def initialize
+            super
+
+            @unit = UNIT
+
+            @linewidth = LINEWIDTH
+
+            @font = "Lohit"
+            # @font = "Arial"
+            # @font = "Verbana"
+            # @font = "Courier"
+
+            @fontsize = 10
+
+            @linecolor = :black
+
+            @linestyle = nil
+
+            # @fillcolor = :gray
+            @fillcolor = :white
+        end
+
+        # Duplicate and register only if already registered.
+        def clone
+            ret = self.deep_copy
+            ret.register if self.registered
+            ret
+        end
+
+        # Output presentation of:
+        def linewidth_o
+            # "#{@linewidth}#{@unit}"
+            @linewidth
+        end
+
+        # Output presentation of:
+        def linecolor_o
+            @@color_map[ @linecolor ]
+        end
+
+        # Output presentation of:
+        def fillcolor_o
+            @@color_map[ @fillcolor ]
+        end
+
+        # Output presentation of:
+        def linestyle_o
+            if @linestyle
+                case @linestyle
+                when :dotted; "1, 5"
+                when :default; "5, 5"
+                when :spaced; "5, 10"
+                when :dense; "10, 5"
+                end
+            else
+                nil
+            end
+        end
+
+        # TBD
+        def corners
+        end
+
+        def output( outlayer = nil )
+            if outlayer == nil || layer == outlayer
+                visualize if @visible
+            end
+        end
+
+        # Resolve value to absolute value.
+        def fix_value( val )
+            Pos.abs( ( @container.pos.x! + val.x! ), ( @container.pos.y! + val.y! ) )
+        end
+
+        # Fix position to absolute value.
+        def fixpos
+            @pos = fix_value( @pos )
+        end
+
+    end
+
+
+    # Common Container properties.
+    module Container
+
+        # Initialize container properties.
+        def containerSetup
+            @pos = Pos.set( 0, 0 )
+            @size = Size.new
+            @items = []
+        end
+
+        # Make Figure the default element container.
+        def open
+            Common.contain( self )
+            self
+        end
+
+        # Reject Figure as the default element container.
+        def close
+            Common.uncontain
+            self
+        end
+
+        # Add item.
+        def add( *items, &blk )
+            if blk
+                open
+                self.instance_eval &blk
+                close
+            else
+                @items += items
+            end
+        end
+    end
+
+
+    # Common Twod properties.
+    module TwodMod
+
+        # Move Twod.
+        def move( *args )
+            @pos.add Pos.set( *args )
+            self
+        end
+
+        # Move in x.
+        def movex( off )
+            @pos.xadd( off )
+            self
+        end
+
+        # Move in y.
+        def movey( off )
+            @pos.yadd( off )
+            self
+        end
+
+    end
+
+
+    # Drawable (Object) container.
+    class Group < Element
+
+        include Container
+        include TwodMod
+
+        self.property_set( :pos, :size )
+
+        # Create Group container and open it (for drawables).
+        def self.create( &blk )
+            o = self.new
+            if blk
+                o.register
+                o.open
+                o.instance_eval &blk
+            else
+                o.register
+                o.open
+            end
+            o
+        end
+
+        # Create Group container and open it (for drawables).
+        def self.inside( layer = nil, &blk )
+            o = self.new
+            o.register
+            if layer
+                Common.layer.push( layer )
+                o.layer layer
+            end
+            o.open
+            o.instance_eval &blk
+            o.close
+            Common.layer.pop if layer
+            o
+        end
+
+        def initialize
+            super
+            containerSetup
+            @pack = nil
+            @gap = nil
+        end
+
+        # Recursively fix positions.
+        def fixpos
+            @items.each do |i|
+                i.fixpos
+            end
+        end
+
+        # Output each item.
+        def output( outlayer = nil )
+            @items.each do |i|
+                i.output( outlayer )
+            end
+        end
+
+        def layer( newlayer = nil )
+            if newlayer
+                @layer = newlayer
+                @items.each do |i|
+                    i.layer newlayer
+                end
+            else
+                @layer
+            end
+        end
+
+        def pack( dir, *gap )
+            @pack = dir
+            if gap.any?
+                @gap = Pos.set( *gap )
+            else
+                @gap = Pos.set( 0, 0 )
+            end
+        end
+
+        def dir
+            @pack
+        end
+
+        def gap
+            @gap
+        end
+
+        def prev
+            if @items.length >= 2
+                @items[-2]
+            else
+                self
+            end
+        end
+
+        def half( side )
+            0
+        end
+
+    end
+
+
+    # Figure container.
+    class Figure < Drawable
+
+        include Container
+
+        self.property_set( :pos, :size )
+        self.property( :scale )
+
+        # Create Figure container and open it (for drawables).
+        def self.create( &blk )
+            o = self.new
+            Common.figure o
+            o.layer layer.current
+            if blk
+                o.open
+                o.instance_eval &blk
+            else
+                o.open
+            end
+            o
+        end
+
+        def initialize
+            super
+            containerSetup
+            @scale = nil
+            @output = false
+        end
+
+        # Output figure and contained elements.
+        def visualize
+
+            if @output
+                STDERR.puts "Refuce to output twice."
+                exit( false )
+            end
+
+            @output = true
+
+            close
+
+            Common.openOutput
+
+            outo %Q{<?xml version="1.0" encoding="UTF-8"?>}
+
+            # No scale:
+            if Opt['zoom'].given
+                scaler = 1 / ( Opt['zoom'].value.to_i / 100.0 )
+            else
+                scaler = 1
+            end
+
+            if @scale
+                scaler = scaler * ( 1 / ( @scale / 100.0 ) )
+            end
+
+            outo %Q{<svg xmlns="http://www.w3.org/2000/svg" width="#{size.x!/scaler}#{unit}" height="#{size.y!/scaler}#{unit}" viewBox="0 0 #{size.x!} #{size.y!}">}
+
+            # Output marker "templates".
+            outo %Q{\
+  <defs>
+
+      <marker id="markerCircle" markerWidth="8" markerHeight="8" refX="5" refY="5">
+          <circle cx="5" cy="5" r="3" style="stroke: none; fill:#{linecolor_o};"/>
+      </marker>
+
+      <marker id="endArrow" markerWidth="13" markerHeight="13" refX="#{10-linewidth}" refY="4"
+             orient="auto" markerUnits="strokeWidth" >
+          <path d="M 0 0 L 0 8 L 10 4 L 0 0" style="fill:#{linecolor_o};" />
+      </marker>
+
+      <marker id="startArrow" markerWidth="13" markerHeight="13" refX="#{linewidth}" refY="4"
+             orient="auto" markerUnits="strokeWidth" >
+          <path d="M 0 4 L 10 8 L 10 0 L 0 4" style="fill:#{linecolor_o};" />
+      </marker>
+
+      <marker id="endTee" markerWidth="13" markerHeight="13" refX="0" refY="5"
+             orient="auto" markerUnits="strokeWidth" >
+          <path d="M 0 0 L 0 10 L 2 10 L 2 0 z" style="fill:#{linecolor_o};" />
+      </marker>
+
+      <marker id="startTee" markerWidth="13" markerHeight="13" refX="0" refY="4"
+             orient="auto" markerUnits="strokeWidth" >
+          <path d="M 0 0 L 0 10 L 2 10 L 2 0 z" style="fill:#{linecolor_o};" />
+      </marker>
+
+  </defs>}
+
+
+            if Opt['name'].given
+                outo %Q{  <title>#{Opt['name'].value}</title>}
+            else
+                outo %Q{  <title>Sivigi figure</title>}
+            end
+
+            @items.each do |i|
+                i.fixpos
+            end
+
+            # Output each layer in turn.
+            layers = Layer.system.list
+            layers.each do |layer|
+                @items.each do |i|
+                    incind 2
+                    i.output( layer )
+                    decind 2
+                end
+            end
+
+            outo "</svg>"
+
+            Common.closeOutput
+        end
+
+    end
+
+
+    # Base class for 1-dim item.
+    class Oned < Drawable
+
+        def Oned.spec( *args ) self.new.register.spec( *args ); end
+        def Oned.dir( pos, dir, len ) self.new.register.dir( pos, dir, len ); end
+
+        def initialize( p1 = nil, p2 = nil )
+            super()
+            @p1 = Pos.new
+            @p2 = Pos.new
+        end
+
+        # Specify geometry.
+        #
+        # Options:
+        #   a.spec [[1,2,3,4]]    # List of Coords in Array (from Box#line).
+        #   a.spec [p1,p2]        # Tuplet of Pos.
+        #   a.spec [[1,2],[3,4]]  # Tuplet of Pairs.
+        #   a.spec [1,2,3,4]      # List of Coords.
+        def spec( *args )
+            if args.length == 1
+                # Array of 4*Coords in Array.
+                args = args[0]
+                @p1.set args[0], args[1]
+                @p2.set args[2], args[3]
+            elsif args.length == 2
+                # 2*Pos or 2*Array
+                @p1.set args[0]
+                @p2.set args[1]
+            elsif args.length == 4
+                # Array of 4*Coords
+                @p1.set args[0], args[1]
+                @p2.set args[2], args[3]
+            end
+            self
+        end
+
+        # Line (Oned) from position, to dir, with length of len.
+        def dir( pos, dir, len )
+            @p1.set pos
+            @p2.set( @p1.dup + Pos.dir( dir, len ) )
+            self
+        end
+
+        # Move line (Oned).
+        def move( *args )
+            p = Pos.set( *args )
+            @p1 + p
+            @p2 + p
+            self
+        end
+
+        def fixpos
+            @p1 = fix_value( @p1 )
+            @p2 = fix_value( @p2 )
+        end
+
+    end
+
+
+    # Base class for 2-dim item.
+    class Twod < Drawable
+
+        include TwodMod
+
+        self.property_set( :pos, :size )
+        self.property( :filled )
+
+
+        def Twod.spec( *args ) self.new.register.spec( *args ); end
+
+        def initialize
+            super
+            @pos = Pos.new
+            @size = Size.new
+            @filled = true
+        end
+
+        # Spec with pos and optional size.
+        def spec( pos, size = nil )
+            self.pos.set pos
+            self.size( size ) if size
+            self
+        end
+
+        # Half of Twod (Box) in length (on specific side).
+        def half( side )
+            case side
+            when :u; size.dup.y * ( 0.5 )
+            when :d; size.dup.y * ( 0.5 )
+            when :l; size.dup.x * ( 0.5 )
+            when :r; size.dup.x * ( 0.5 )
+            when :v; size.dup.y * ( 0.5 )
+            when :h; size.dup.x * ( 0.5 )
+            end
+        end
+
+        # Return shortest path between 2D objects.
+        #
+        # @param peer [Twod] peer.
+        # @return [Array] Array of 4 coords (for Line spec).
+        def path( peer )
+            inter1 = self.intersection( peer.pos.to_gpos )
+            inter2 = peer.intersection( self.pos.to_gpos )
+            inter1.to_a + inter2.to_a
+        end
+
+        def center
+            @pos.dup
+        end
+
+        def pack
+            prev = @container.prev
+            dir = @container.dir
+            gap = @container.gap
+            x = prev.pos.xnow + gap.x
+            y = prev.pos.ynow + gap.y
+            case dir
+            when :u; y -= ( prev.half( dir ) + self.half( dir ) )
+            when :d; y += ( prev.half( dir ) + self.half( dir ) )
+            when :l; x -= ( prev.half( dir ) + self.half( dir ) )
+            when :r; x += ( prev.half( dir ) + self.half( dir ) )
+            end
+            pos x, y
+        end
+
+    end
+
+
+    # Text object.
+    class Text < Drawable
+
+        attr_reader :anchor
+        attr_reader :baseline
+
+        self.property_set( :pos )
+        self.property( :text, :angle )
+
+        def Text.spec( *args ) self.new.register.spec( *args ); end
+
+        def initialize
+            super
+
+            @text = "noname"
+            @angle = nil
+
+            @pos = Pos.new
+
+            # start/middle/end
+            @anchor = :start
+            @baseline = "middle"
+
+        end
+
+        def spec( pos, text, fontsize = nil, font = nil, anchor = nil, baseline = nil )
+            @pos.set pos
+            @text = text
+            @anchor &&= anchor
+            baseline( baseline ) if baseline
+            @fontsize &&= fontsize
+            @font &&= font
+            self
+        end
+
+        def visualize
+
+            if @angle
+                transform = %Q{transform="rotate(#{@angle}, #{@pos.x!}, #{@pos.y!})"}
+            else
+                transform = ""
+            end
+
+            if @text.kind_of? String
+
+                # Single line.
+                outo %Q{<text x="#{@pos.x!}" y="#{@pos.y!}" font-family="#{font}" font-size="#{fontsize}" fill="#{linecolor_o}" text-anchor="#{@anchor}" dominant-baseline="#{@baseline}" #{transform}>#{text}</text>}
+
+            elsif @text.kind_of? Array
+
+                # Example:
+                #    <text y="20">
+                #        <tspan x="10">tspan line 1</tspan>
+                #        <tspan x="10" dy="15">tspan line 2</tspan>
+                #        <tspan x="10" dy="15">tspan line 3</tspan>
+                #    </text>
+
+                # Multiple lines.
+                outi "2+", %Q{<text y="#{@pos.y!}" font-family="#{font}" font-size="#{fontsize}" fill="#{linecolor_o}" text-anchor="#{@anchor}" dominant-baseline="#{@baseline}" #{transform}>}
+                outo %Q{<tspan x="#{pos.x!}">#{@text[0]}</tspan>}
+                @text[2..-1].each do |text|
+                    outo %Q{<tspan x="#{pos.x!}" dy="#{fontsize+2}">#{text}</tspan>}
+                end
+                outi "-2", %Q{</text>}
+
+            end
+
+        end
+
+        # Anchor defines horizontal alignment.
+        def anchor( val )
+            case val
+            when :c; @anchor = :middle
+            when :l; @anchor = :start
+            when :r; @anchor = :end
+            else @anchor = :start
+            end
+            self
+        end
+
+        # Baseline defines vertical alignment.
+        def baseline( val )
+            case val
+            when :d; @baseline = "text-before-edge"
+            when :u; @baseline = "text-after-edge"
+            else     @baseline = "middle"
+                # else @baseline = "auto"
+            end
+            self
+        end
+
+    end
+
+
+    # Module for adding line ending (arrow) properties.
+    module LineArrows
+
+        def initArrow
+            @sarrow = false
+            @earrow = false
+            @stee = false
+            @etee = false
+        end
+
+        def sarrow
+            @sarrow = true
+            self
+        end
+
+        def earrow
+            @earrow = true
+            self
+        end
+
+        def arrow
+            sarrow
+            earrow
+        end
+
+        def set_sarrow( val )
+            @sarrow = val
+        end
+
+        def set_earrow( val )
+            @earrow = val
+        end
+
+        def stee
+            @stee = true
+            self
+        end
+
+        def etee
+            @etee = true
+            self
+        end
+
+        def tee
+            stee
+            etee
+        end
+
+        def set_stee( val )
+            @stee = val
+        end
+
+        def set_etee( val )
+            @etee = val
+        end
+
+    end
+
+
+    # Point-to-point line. Accepts arrow heads.
+    class Line < Oned
+
+        attr_reader :p1, :p2
+
+        include LineArrows
+
+        def initialize( p1 = nil, p2 = nil )
+            super( p1, p2 )
+            initArrow
+            @label = nil
+        end
+
+        def to_vec
+            @p1.to_vec( @p2 )
+        end
+
+        def midpoint
+            v = to_vec
+            v2 = v.half
+            ( @p1.dup + v2.to_pos )
+        end
+
+#        def point( nu, di )
+#            v = @p1.to_vec( @p2 )
+#            u = v.unit
+#            ol = v.length
+#            nl = u * (ol*nu/di)
+#            p = @p1.dup + nl.to_pos
+#            p
+#        end
+
+        # Clockwise degree angle. Return nil if horizontal.
+        def angle
+            v = to_vec
+            if v[1] == 0.0
+                nil
+            else
+                v.angle
+            end
+        end
+
+        def label( text, place = nil, gap = nil )
+            @label = Label.new( text )
+            @label.place place if place
+            @label.gap gap if gap
+            self
+        end
+
+
+        def visualize
+
+            @label.output( self ) if @label
+
+            # As SVG stands at the moment (160124_2101), we have to
+            # manually shorten the line to make sure that line is hidden
+            # by marker, and that marker does not add to length of line.
+            if @sarrow && @earrow
+
+                p1n = @p1.offset_self( @p2, -linewidth )
+                p2n = @p1.offset_peer( @p2, -linewidth )
+                x1, y1, x2, y2 = p1n.x!, p1n.y!, p2n.x!, p2n.y!
+                tail = %Q{ marker-start="url(#startArrow)" marker-end="url(#endArrow)"}
+
+            elsif @sarrow
+
+                p1n = @p1.offset_self( @p2, -linewidth )
+                x1, y1, x2, y2 = p1n.x!, p1n.y!, @p2.x!, @p2.y!
+                tail = %Q{ marker-start="url(#startArrow)"}
+
+            elsif @earrow
+
+                p2n = @p1.offset_peer( @p2, -linewidth )
+                x1, y1, x2, y2 = @p1.x!, @p1.y!, p2n.x!, p2n.y!
+                tail = %Q{ marker-end="url(#endArrow)"}
+
+            elsif @stee && @etee
+
+                p1n = @p1.offset_self( @p2, -linewidth )
+                p2n = @p1.offset_peer( @p2, -linewidth )
+                x1, y1, x2, y2 = p1n.x!, p1n.y!, p2n.x!, p2n.y!
+                tail = %Q{ marker-start="url(#startTee)" marker-end="url(#endTee)"}
+
+            elsif @stee
+
+                p1n = @p1.offset_self( @p2, -linewidth )
+                x1, y1, x2, y2 = p1n.x!, p1n.y!, @p2.x!, @p2.y!
+                tail = %Q{ marker-start="url(#startTee)"}
+
+            elsif @etee
+
+                p2n = @p1.offset_peer( @p2, -linewidth )
+                x1, y1, x2, y2 = @p1.x!, @p1.y!, p2n.x!, p2n.y!
+                tail = %Q{ marker-end="url(#endTee)"}
+
+            else
+
+                x1, y1, x2, y2 = @p1.x!, @p1.y!, @p2.x!, @p2.y!
+                tail = ""
+
+            end
+
+            if linestyle
+                tail += %Q{ stroke-dasharray="#{linestyle_o}"}
+            end
+
+            # Without arrow.
+            #   outo %Q{<line x1="#{@p1.x!}" y1="#{@p1.y!}" x2="#{@p2.x!}" y2="#{@p2.y!}" stroke="#{linecolor_o}"
+            #     stroke-width="#{linewidth_o}" />}
+            # With arrow.
+            #   outo %Q{<line x1="#{@p1.x!}" y1="#{@p1.y!}" x2="#{@p2.x!}" y2="#{@p2.y!}" stroke="#{linecolor_o}"
+            #     stroke-width="#{linewidth_o}" marker-end="url(#endArrow)" />}
+            outo %Q{<line x1="#{x1}" y1="#{y1}" x2="#{x2}" y2="#{y2}" stroke="#{linecolor_o}" stroke-width="#{linewidth_o}" #{tail} />}
+
+        end
+
+    end
+
+
+    # Multi-segment line. Accepts arrow heads.
+    class Polyline < Line
+
+        # Polyline path.
+        attr_reader :path
+
+
+        def initialize
+            super
+            @path = []
+        end
+
+
+        def Polyline.path( *args )
+            poly = self.new.register
+
+            if args[0].kind_of? Fixnum
+                # Starting pos is list.
+                tp = Pos.ini( args[0], args[1] )
+                args.shift( 2 )
+            else
+                tp = args[0]
+                args.shift
+            end
+
+            poly.p.push tp
+
+            if args[0].kind_of? Symbol
+                # List of dir,len pairs.
+                pos = nil
+                dir = nil
+                args.each_with_index do |p, i|
+                    if i % 2 == 0
+                        dir = p
+                    else
+                        np = Pos.dir( dir, p )
+                        tp = tp + np
+                        poly.p.push tp.dup
+                    end
+                end
+            else
+                # List of positions.
+                args.each do |p|
+                    tp = tp + p
+                    poly.p.push tp.dup
+                end
+            end
+
+            poly
+        end
+
+
+        # Create Polyline with specified Pos. Either paired x,y in Array
+        # or and flat list of alternating x and y.
+        def spec( *args )
+
+            if args[0].kind_of? Array
+
+                # Coord pairs.
+                args.each do |p|
+                    @path.push Pos.ini( p[0], p[1] )
+                end
+
+            else
+
+                if args[0].kind_of? Pos
+                    # List of pos.
+                    @path = args
+                else
+                    # Odd index in Array
+                    odd = false
+                    x = nil
+                    y = nil
+                    # Alternating x, y.
+                    args.each do |p|
+                        if odd
+                            @path.push Pos.ini( x, p )
+                        else
+                            x = p
+                        end
+                        odd = not( odd )
+                    end
+                end
+            end
+
+            self
+        end
+
+
+        # Move with offset.
+        def move( *args )
+            p = Pos.set( *args )
+            @path.length.times do |i|
+                @path[i] = @path[i] + p
+            end
+            self
+        end
+
+
+        def coords( p = @path )
+            p.map{|i| i.to_s}.join(' ')
+        end
+
+
+        def fixpos
+            @path = @path.map{|p| fix_value( p )}
+        end
+
+
+        def visualize
+
+            pn = @path.dup
+
+            # As SVG stands at the moment (160124_2101), we have to
+            # manually shorten the line to make sure that line is hidden
+            # by marker, and that marker does not add to length of line.
+            if @sarrow && @earrow
+
+                pn[0] = pn[0].offset_self( pn[1], -linewidth )
+                pn[-1] = pn[-2].offset_peer( pn[-1], -linewidth )
+                tail = %Q{marker-start="url(#startArrow)" marker-end="url(#endArrow)"}
+
+            elsif @sarrow
+
+                pn[0] = pn[0].offset_self( pn[1], -linewidth )
+                tail = %Q{marker-start="url(#startArrow)"}
+
+
+            elsif @earrow
+
+                pn[-1] = pn[-2].offset_peer( pn[-1], -linewidth )
+                tail = %Q{marker-end="url(#endArrow)"}
+
+            else
+
+                # No arrow.
+                tail = ""
+                outo %Q{<polyline points="#{coords}" style="stroke:#{linecolor_o}; stroke-width: #{linewidth_o}; fill: none;" />}
+
+            end
+
+            if linestyle
+                tail += %Q{ stroke-dasharray="#{linestyle_o}"}
+            end
+
+            outo %Q{<polyline points="#{coords(pn)}" style="stroke:#{linecolor_o}; stroke-width: #{linewidth_o}; fill: none;" #{tail} />}
+
+        end
+
+    end
+
+
+    # Label for Box, Line or Ellipse/Circle.
+    class Label < Drawable
+
+        self.property( :text, :place, :gap, :font, :fontsize )
+
+        def initialize( text )
+            super()
+            @text = text
+            @place = :u
+            @gap = 2
+        end
+
+        def output_box( h )
+            spec = case @place
+                   when :c; [ [h.pos.x!, h.pos.y!], :c, :c ]
+
+                   when :u; [ [ h.pos.x!, h.x1y1.y! + @gap ], :d, :c ]
+                   when :d; [ [ h.pos.x!, h.x2y2.y! - @gap ], :u, :c ]
+
+                   when :l; [ [ h.x1y1.x! + @gap, h.pos.y! ], :c, :l ]
+                   when :r; [ [ h.x2y2.x! - @gap, h.pos.y! ], :c, :r ]
+
+                   when :ul; [ [ h.x1y1.x! + @gap, h.x1y1.y! + @gap ], :d, :l ]
+                   when :dl; [ [ h.x1y1.x! + @gap, h.x2y2.y! - @gap ], :u, :l ]
+                   when :ur; [ [ h.x2y2.x! - @gap, h.x1y1.y! + @gap ], :d, :r ]
+                   when :dr; [ [ h.x2y2.x! - @gap, h.x2y2.y! - @gap ], :u, :r ]
+
+                   else; raise RuntimeError, "Unknown placement for label: \"#{@place}\"..."
+                   end
+
+            t = Text.new
+            t.fontsize h.fontsize
+            t.pos spec[0]
+            t.text @text
+            t.baseline spec[1]
+            t.anchor spec[2]
+            t.output
+        end
+
+        def output_line( h )
+            t = Text.new
+            t.fontsize h.fontsize
+
+            # Calculate gap.
+            v = Gvec[ 0, - @gap ]
+            g = v.rotate( h.to_vec.rad ).to_pos
+
+            t.pos( h.midpoint + g )
+
+            t.text @text
+            t.baseline @place
+            t.anchor :c
+
+            t.angle h.angle
+
+            t.output
+        end
+
+        def output_ellipse( h )
+            t = Text.new
+            t.fontsize h.fontsize
+            t.text @text
+            t.pos h.pos
+            t.baseline :c
+            t.anchor :c
+            t.output
+        end
+
+        # Output Label depending of the host for the label.
+        def output( h )
+            if h.kind_of? Box
+                output_box( h )
+            elsif h.kind_of? Line
+                output_line( h )
+            elsif h.kind_of? Ellipse
+                output_ellipse( h )
+            else
+                raise RuntimeError, "Unknown host type for label: \"#{h.class}\"..."
+            end
+        end
+
+    end
+
+
+    # Rectangle box.
+    class Box < Twod
+
+        def initialize
+            super
+            @label = nil
+        end
+
+        # Box corners.
+        def x1y1() @pos.dup.add( size.dup.inv.scale( 0.5 ) ); end
+        def x2y1() @pos.dup.add( size.dup.yinv.scale( 0.5 ) ); end
+        def x1y2() @pos.dup.add( size.dup.xinv.scale( 0.5 ) ); end
+        def x2y2() @pos.dup.add( size.dup.scale( 0.5 ) ); end
+
+        # Box sides.
+        def xy1() @pos.dup.ysub( size.ydup.scale( 0.5 ) ); end
+        def xy2() @pos.dup.yadd( size.ydup.scale( 0.5 ) ); end
+        def x1y() @pos.dup.xsub( size.xdup.scale( 0.5 ) ); end
+        def x2y() @pos.dup.xadd( size.xdup.scale( 0.5 ) ); end
+
+
+        # Return side middle position.
+        def side( spot )
+            ret = nil
+            case spot
+            when :u; ret = xy1
+            when :d; ret = xy2
+            when :l; ret = x1y
+            when :r; ret = x2y
+            else; raise RuntimeError, "Unknown side spot: #{spot}"
+            end
+            ret
+        end
+
+        # Return side middle position.
+        def corner( spot )
+            case spot
+            when :ul; x1y1
+            when :ur; x2y1
+            when :dl; x1y2
+            when :dr; x2y2
+            else; raise RuntimeError, "Unknown corner spot: #{spot}"
+            end
+        end
+
+        # Return side as line.
+        def sideline( side )
+            l = nil
+            case side
+            when :u; l = Gseg.new_by_pos( x1y1, x2y1 )
+            when :d; l = Gseg.new_by_pos( x1y2, x2y2 )
+            when :l; l = Gseg.new_by_pos( x1y1, x1y2 )
+            when :r; l = Gseg.new_by_pos( x2y1, x2y2 )
+            else; l = nil
+            end
+            l
+        end
+
+
+        # Intersections point between pos of box and to position,
+        # i.e. nearest point on the boundary of box.
+        #
+        # @param to [Gpos] Point (from pos to this).
+        # @return   [Gpos] Intersection.
+        def intersection( to )
+
+            # Bullet line between box center and to-point.
+            bline = Gseg.new( self.pos.to_gpos, to )
+
+            # Find which side of self intersects with bline.
+            side = nil
+            [ :r, :l, :u, :d ].each do |sidesym|
+                trial = self.sideline( sidesym )
+                if trial.intersects_with?( bline )
+                    side = trial
+                    break
+                end
+            end
+
+            side.intersection_point_with( bline )
+        end
+
+
+        # Return selected side position.
+        #
+        # @param side [Symbol] Side id of box (u,d,l,r).
+        # @param relpos [Array<Integer>] Tuplet with mult/div running
+        #        top-down, left-rigth.
+        def sidepos( side, relpos )
+            t = nil
+
+            case side
+
+            when :u;
+                t = x1y1
+                t.x = t.x + ( size.x.to_f * relpos[0] / relpos[1] ).to_ri
+
+            when :d;
+                t = x1y2
+                t.x = t.x + ( size.x.to_f * relpos[0] / relpos[1] ).to_ri
+
+            when :l;
+                t = x1y1
+                t.y = t.y + ( size.y.to_f * relpos[0] / relpos[1] ).to_ri
+
+            when :r;
+                t = x2y1
+                t.y = t.y + ( size.y.to_f * relpos[0] / relpos[1] ).to_ri
+
+            end
+
+            t
+        end
+
+
+        # Set label.
+        def label( text = nil, place = nil, gap = nil )
+            if text
+                @label = Label.new( text )
+                @label.place place if place
+                @label.gap gap if gap
+                self
+            else
+                @label
+            end
+        end
+
+        # Output rectal.
+        def visualize
+
+            if linestyle
+                style = %Q{ stroke-dasharray="#{linestyle_o}"}
+            else
+                style = ""
+            end
+
+            fill = ""
+            if @filled
+                fill="fill=\"#{fillcolor_o}\""
+            else
+                fill="fill=\"none\""
+            end
+
+            outo %Q{<rect x="#{x1y1.x!}" y="#{x1y1.y!}" width="#{size.x!}" height="#{size.y!}" #{fill} stroke="#{linecolor_o}" stroke-width="#{linewidth_o}" #{style} />}
+
+            @label.output( self ) if @label
+
+        end
+
+    end
+
+
+    # Empty Box.
+    class Frame < Box
+        def initialize
+            super
+            @filled = false
+        end
+    end
+
+
+    # Elliptical circle.
+    class Ellipse < Twod
+
+        def label( text )
+            @label = Label.new( text )
+            self
+        end
+
+        # Intersections point between pos of ellipse and to position,
+        # i.e. nearest point on the boundary of ellipse.
+        #
+        # @param to [Gpos] Point (from pos to this).
+        # @return   [Gpos] Intersection.
+        #
+        # p = [(a*b/(sqrt(b**2+a**2*tan(n)**2)), (a*b*tan(n)/(sqrt(b**2+a**2*tan(n)**2))) ]
+        #
+        # if 0 <= angle < 90 or 270 < angle <= 360
+        #   p
+        # else
+        #   neg( p )
+        def intersection( to )
+            cp = self.pos.to_gpos
+            sp = self.size.to_gpos
+            line = cp.to_vec( to )
+
+            n = line.rad
+            a = sp.x
+            b = sp.y
+
+            div = Math.sqrt( ( b*Math.cos(n) ) ** 2 + ( a*Math.sin(n) ) ** 2 )
+            px = ( a * b * Math.cos(n) ) / div
+            py = ( a * b * Math.sin(n) ) / div
+
+            cp.to_vec + Gvec[ px, py ]
+        end
+
+        def visualize
+
+            if linestyle
+                style = %Q{ stroke-dasharray="#{linestyle_o}"}
+            else
+                style = ""
+            end
+
+            fill = ""
+            if @filled
+                fill="fill=\"#{fillcolor_o}\""
+            end
+
+            outo %Q{<ellipse cx="#{@pos.x!}" cy="#{@pos.y!}" rx="#{size.x!}" ry="#{size.y!}" #{fill} stroke="#{linecolor_o}" stroke-width="#{linewidth_o}" #{style} />}
+
+            @label.output( self ) if @label
+
+        end
+
+    end
+
+
+    # Round circle.
+    #
+    # Circle is a special case of Ellipse with only one dimension as
+    # parameter.
+    class Circle < Ellipse
+
+        def Circle.spec( *args )
+            ret = super( args[0] )
+            ret.radius args[1]
+            ret
+        end
+
+
+        # Set or get radius (size.x=radius,size.y=radius).
+        def radius( r = nil )
+            if r
+                @size = Pos.ini( r, r )
+            else
+                @size.xnow
+            end
+        end
+
+        # Intersections point between pos of circle and to position,
+        # i.e. nearest point on the boundary of circle.
+        #
+        # @param to [Gpos] Point (from pos to this).
+        # @return   [Gpos] Intersection.
+        def intersection( to )
+            cp = self.pos.to_gpos
+
+            line = cp.to_vec( to )
+            uline = line.unit
+            radius = uline * size.x
+
+            ( cp.to_vec + radius ).to_gpos
+        end
+
+    end
+
+
+    # Dot is a special case of Circle with DOTSIZE size and fill.
+    class Dot < Circle
+
+        def Dot.spec( pos )
+            super( pos, DOTSIZE )
+        end
+
+        def initialize
+            super
+            @fillcolor = :black
+        end
+
+    end
+
+end
+
+
+
+
+# ------------------------------------------------------------
+# Sivigi execution.
+# ------------------------------------------------------------
+
+
+infile = nil
+if Opt['file'].given
+    infile = Opt['file'].value
+else
+    infile = STDIN
+end
+
+output = nil
+if Opt['output'].given
+    if Opt['output'].value.any?
+        output = Opt['output'].value[0]
+    elsif Opt['file'].given
+        output = File.basename( Opt['file'].value, '.siv.rb' ) + '.svg'
+    else
+        output = "<stdout>"
+    end
+else
+    output = "<stdout>"
+end
+
+
+# Set output stream.
+Sivigi::Common.outfile output
+
+# Initialize layer system.
+Sivigi::Common.layer Sivigi::Layer.new
+
+
+if Opt['size'].given
+    x, y = Opt['size'].value.split(',').map{|i| i.to_i}
+    f = Sivigi::Figure.create do
+        size x, y
+    end
+    f.open
+end
+
+
+include Sivigi unless Opt['module'].given
+
+if infile != STDIN
+    load( infile )
+end
+
+Sivigi::Common.figure.output
