@@ -22,8 +22,6 @@ Drawables.
 
 Let's start with a simple example defining the Sivigi (drawing) file, "onebox.siv.rb":
 
-    include Sivigi
-    
     Figure.create do
         size 100, 100
     end
@@ -72,14 +70,14 @@ If Property method is given without arguments, it returns the current
 value of the Property.
 
 
-### Coordinates
+### Dimensions and Coordinates
 
 Box geometry is specified with position and size. Both are a pair of x
-and y values. Positions is obviously based on coordinates, and size is
-simply a pair of x and y values. However they are essentially the
-same, and in fact they are both based on "Pos" class.
+and y values. Position is coordinate based, and size is dimension
+based. However they are in many ways the same, and in fact they are
+both based on "Pos" class.
 
-Pos class have to Coord properties which are either absolute or
+Pos class have two Coord properties which are either absolute or
 relative coordinates. Coordinates grow to right for x and downwards
 for y. Absolute coordinates are references to figure boundary, and
 relative coordinates are references to some Drawable, which might
@@ -232,7 +230,7 @@ Line.
 
 ## Common properties
 
-The are number of common properties that all or allmost all Drawables
+The are number of common properties that all or almost all Drawables
 share.
 
 * Visible:    If Drawables is visible, it will be drawn.
