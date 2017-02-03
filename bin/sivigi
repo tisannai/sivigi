@@ -5,7 +5,9 @@ include Como
 
 require 'matrix'
 require 'geometry'
-require 'numeric_ext'
+#require 'numeric_ext'
+
+#require 'byebug'
 
 
 # Acronyms:
@@ -77,6 +79,7 @@ class Float
         self.round.to_i
     end
 end
+
 
 
 module Geometry
@@ -157,6 +160,7 @@ module Geometry
         end
 
     end
+
 
     class Segment
 
@@ -487,6 +491,12 @@ module Sivigi
             ret.xset self.x
             ret.yset self.y
             ret
+        end
+
+        def crd
+            @x = Coord.set( @x ) unless @x.kind_of? Coord
+            @y = Coord.set( @y ) unless @y.kind_of? Coord
+            self
         end
 
         # Scale pos with val (scalar).
@@ -1636,6 +1646,7 @@ module Sivigi
             ( @p1.dup + v2.to_pos )
         end
 
+        # TODO: move this to Geometry::Vector
 #        def point( nu, di )
 #            v = @p1.to_vec( @p2 )
 #            u = v.unit
@@ -1757,7 +1768,7 @@ module Sivigi
                 args.shift
             end
 
-            poly.p.push tp
+            poly.path.push tp
 
             if args[0].kind_of? Symbol
                 # List of dir,len pairs.
@@ -1768,15 +1779,15 @@ module Sivigi
                         dir = p
                     else
                         np = Pos.dir( dir, p )
-                        tp = tp + np
-                        poly.p.push tp.dup
+                        tp = tp.dup.add( np )
+                        poly.path.push tp.dup
                     end
                 end
             else
                 # List of positions.
                 args.each do |p|
-                    tp = tp + p
-                    poly.p.push tp.dup
+                    tp = tp.dup.add( np )
+                    poly.path.push tp.dup
                 end
             end
 
@@ -2063,23 +2074,23 @@ module Sivigi
 
             when :u;
                 t = x1y1
-                t.x = t.x + ( size.x.to_f * relpos[0] / relpos[1] ).to_ri
+                t.xset ( t.x + ( size.x.to_f * relpos[0] / relpos[1] ) ).to_ri
 
             when :d;
                 t = x1y2
-                t.x = t.x + ( size.x.to_f * relpos[0] / relpos[1] ).to_ri
+                t.xset ( t.x + ( size.x.to_f * relpos[0] / relpos[1] ) ).to_ri
 
             when :l;
                 t = x1y1
-                t.y = t.y + ( size.y.to_f * relpos[0] / relpos[1] ).to_ri
+                t.yset ( t.y + ( size.y.to_f * relpos[0] / relpos[1] ) ).to_ri
 
             when :r;
                 t = x2y1
-                t.y = t.y + ( size.y.to_f * relpos[0] / relpos[1] ).to_ri
+                t.yset ( t.y + ( size.y.to_f * relpos[0] / relpos[1] ) ).to_ri
 
             end
 
-            t
+            t.crd
         end
 
 
