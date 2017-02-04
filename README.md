@@ -5,6 +5,10 @@ created programmatically using Ruby language. Sivigi includes user
 methods that are used to create the Figure and all the contained
 Drawables.
 
+NOTE 170204: Sivigi is going to be developed by using it. Backwards
+compatibility will be broken every now and then if improvements
+requires it.
+
 
 ## Features
 
