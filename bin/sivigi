@@ -5,9 +5,9 @@ include Como
 
 require 'matrix'
 require 'geometry'
-#require 'numeric_ext'
+require 'numeric_math'
 
-#require 'byebug'
+# require 'byebug'
 
 
 # Acronyms:
@@ -31,6 +31,7 @@ Spec.command( 'sivigi', 'Tero Isannainen', '2017',
         # TODO:
         #        [ :exclusive,  'doc',    '-d', "User documentation." ],
     ] )
+
 
 
 # ------------------------------------------------------------
@@ -69,6 +70,7 @@ class Numeric
     def value()   self; end
     def revalue() self; end
     def resolve() self; end
+    def coord() Coord.abs( self ); end
 end
 
 
@@ -634,10 +636,23 @@ module Sivigi
         @@layer = nil
 
         @@color_map = {
-            :black => "#000000",
-            :white => "#ffffff",
-            :gray  => "#888888",
-        }
+            :black    => "#000000",
+            :white    => "#FFFFFF",
+            :red      => "#FF0000",
+            :lime     => "#00FF00",
+            :blue     => "#0000FF",
+            :yellow   => "#FFFF00",
+            :cyan     => "#00FFFF",
+            :magenta  => "#FF00FF",
+            :silver   => "#C0C0C0",
+            :gray     => "#808080",
+            :maroon   => "#800000",
+            :olive    => "#808000",
+            :green    => "#008000",
+            :purple   => "#800080",
+            :teal     => "#008080",
+            :navy     => "#000080",
+         }
 
         # Contained items.
         attr_reader :items
@@ -727,6 +742,19 @@ module Sivigi
         # Duplicate and register only if already registered.
         def clone
             dup
+        end
+
+        # Return color value.
+        def color_o( spec )
+            if spec.kind_of? Symbol
+                @@color_map[ spec ]
+            elsif spec.kind_of? Integer
+                "#" + spec.to_s(16).upcase
+            elsif spec.kind_of? String
+                spec
+            else
+                raise RuntimeError, "Unknown color: #{spec}"
+            end
         end
 
         # Output without indent change.
@@ -979,7 +1007,7 @@ module Sivigi
         LINEWIDTH = 1
         DOTSIZE   = LINEWIDTH*4
 
-        self.property( :unit, :linewidth, :linestyle, :font, :fontsize, :fillcolor )
+        self.property( :unit, :linewidth, :linestyle, :font, :fontsize, :linecolor, :fillcolor )
 
 
         def initialize
@@ -1019,12 +1047,12 @@ module Sivigi
 
         # Output presentation of:
         def linecolor_o
-            @@color_map[ @linecolor ]
+            color_o( @linecolor )
         end
 
         # Output presentation of:
         def fillcolor_o
-            @@color_map[ @fillcolor ]
+            color_o( @fillcolor )
         end
 
         # Output presentation of:
@@ -1666,6 +1694,7 @@ module Sivigi
             end
         end
 
+        # Set label.
         def label( text, place = nil, gap = nil )
             @label = Label.new( text )
             @label.place place if place
@@ -2024,8 +2053,39 @@ module Sivigi
             end
         end
 
-        # Return side as line.
-        def sideline( side )
+        # Return selected side position.
+        #
+        # @param side [Symbol] Side id of box (u,d,l,r).
+        # @param relpos [Array<Integer>] Tuplet with mult/div running
+        #        top-down, left-right.
+        def sidepos( side, relpos )
+            t = nil
+
+            case side
+
+            when :u;
+                t = x1y1
+                t.xset ( t.x + ( size.x.to_f * relpos[0] / relpos[1] ) ).coord
+
+            when :d;
+                t = x1y2
+                t.xset ( t.x + ( size.x.to_f * relpos[0] / relpos[1] ) ).coord
+
+            when :l;
+                t = x1y1
+                t.yset ( t.y + ( size.y.to_f * relpos[0] / relpos[1] ) ).coord
+
+            when :r;
+                t = x2y1
+                t.yset ( t.y + ( size.y.to_f * relpos[0] / relpos[1] ) ).coord
+
+            end
+
+            t
+        end
+
+        # Return side as segment.
+        def sideline_seg( side )
             l = nil
             case side
             when :u; l = Gseg.new_by_pos( x1y1, x2y1 )
@@ -2051,7 +2111,7 @@ module Sivigi
             # Find which side of self intersects with bline.
             side = nil
             [ :r, :l, :u, :d ].each do |sidesym|
-                trial = self.sideline( sidesym )
+                trial = self.sideline_seg( sidesym )
                 if trial.intersects_with?( bline )
                     side = trial
                     break
@@ -2059,38 +2119,6 @@ module Sivigi
             end
 
             side.intersection_point_with( bline )
-        end
-
-
-        # Return selected side position.
-        #
-        # @param side [Symbol] Side id of box (u,d,l,r).
-        # @param relpos [Array<Integer>] Tuplet with mult/div running
-        #        top-down, left-rigth.
-        def sidepos( side, relpos )
-            t = nil
-
-            case side
-
-            when :u;
-                t = x1y1
-                t.xset ( t.x + ( size.x.to_f * relpos[0] / relpos[1] ) ).to_ri
-
-            when :d;
-                t = x1y2
-                t.xset ( t.x + ( size.x.to_f * relpos[0] / relpos[1] ) ).to_ri
-
-            when :l;
-                t = x1y1
-                t.yset ( t.y + ( size.y.to_f * relpos[0] / relpos[1] ) ).to_ri
-
-            when :r;
-                t = x2y1
-                t.yset ( t.y + ( size.y.to_f * relpos[0] / relpos[1] ) ).to_ri
-
-            end
-
-            t.crd
         end
 
 
