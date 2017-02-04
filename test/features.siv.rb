@@ -42,6 +42,11 @@ l5.linestyle :default
 
 l6 = Line.dir( [50,150], :d, 150 ).earrow.label( "Fiifuu", :u )
 
+# Box relative to line.
+br = Box.draw do
+    size 10, 20
+    pos l6.point( 4,5 )
+end
 
 t = Text.spec [30, 30], "Foobar", 12
 

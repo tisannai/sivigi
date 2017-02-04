@@ -27,7 +27,7 @@ end
 stack = base.dup.label( 'stack', :c ).pack
 empty = base.dup.pack
 heap  = base.dup.label( 'heap', :c ).pack
-bss   = base.dup.label( 'bss', :c ).size( xsize, ysize-50 ).pack
+bss   = base.dup.label( 'bss', :c ).size( xsize, ysize-50 ).pack( 10 )
 text  = base.dup.label( 'text', :c ).size( xsize, ysize-50 ).pack
 
 left = Line.spec( stack.side(:l), text.side(:l) )

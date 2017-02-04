@@ -1157,6 +1157,8 @@ module Sivigi
         include Container
         include TwodMod
 
+        attr_reader :gap
+
         self.property_set( :pos, :size )
 
         # Create Group container and open it (for drawables).
@@ -1192,7 +1194,7 @@ module Sivigi
             super
             containerSetup
             @pack = nil
-            @gap = nil
+            @gap = 0
         end
 
         # Recursively fix positions.
@@ -1220,21 +1222,23 @@ module Sivigi
             end
         end
 
-        def pack( dir, *gap )
+        # Set packing style.
+        def pack( dir, gap = nil )
             @pack = dir
-            if gap.any?
-                @gap = Pos.set( *gap )
-            else
-                @gap = Pos.set( 0, 0 )
-            end
+            @gap = gap if gap
         end
 
         def dir
             @pack
         end
 
-        def gap
-            @gap
+        # Return gap as Pos.
+        def dirgap( gap = @gap )
+            if @pack == :d || @pack == :u
+                Pos.set( 0, gap )
+            else
+                Pos.set( gap, 0 )
+            end
         end
 
         def prev
@@ -1480,12 +1484,12 @@ module Sivigi
             @pos.dup
         end
 
-        def pack
+        # Pack box (with gap). Default gap value from container.
+        def pack( gap = @container.gap )
             prev = @container.prev
             dir = @container.dir
-            gap = @container.gap
-            x = prev.pos.xnow + gap.x
-            y = prev.pos.ynow + gap.y
+            x = prev.pos.xnow + @container.dirgap( gap ).xnow
+            y = prev.pos.ynow + @container.dirgap( gap ).ynow
             case dir
             when :u; y -= ( prev.half( dir ) + self.half( dir ) )
             when :d; y += ( prev.half( dir ) + self.half( dir ) )
@@ -1674,15 +1678,20 @@ module Sivigi
             ( @p1.dup + v2.to_pos )
         end
 
-        # TODO: move this to Geometry::Vector
-#        def point( nu, di )
-#            v = @p1.to_vec( @p2 )
-#            u = v.unit
-#            ol = v.length
-#            nl = u * (ol*nu/di)
-#            p = @p1.dup + nl.to_pos
-#            p
-#        end
+        # Return selected position on the line.
+        #
+        # @param mu [Integer] Multiplier (for Divider).
+        # @param di [Integer] Divider (line slicer).
+        #
+        # @return [Pos] Position on line.
+        def point( mu, di )
+            v = @p1.to_vec( @p2 )
+            u = v.unit
+            ol = v.length
+            nl = u * (ol*mu/di)
+            p = @p1.dup.add( nl.to_pos )
+            p
+        end
 
         # Clockwise degree angle. Return nil if horizontal.
         def angle
