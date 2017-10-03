@@ -569,9 +569,9 @@ module Sivigi
             self
         end
 
-        alias ox xadd
-        alias oy yadd
-        alias o  add
+        def ox( off ) self.dup.xadd( off ) end
+        def oy( off ) self.dup.yadd( off ) end
+        def o( *off ) self.dup.add ( off ) end
         alias +  add
         alias -  sub
 
@@ -1004,8 +1004,23 @@ module Sivigi
     # Base object for drawables.
     class Drawable < Element
 
-        LINEWIDTH = 1
-        DOTSIZE   = LINEWIDTH*4
+        #        LINEWIDTH = 1
+        #        DOTSIZE   = LINEWIDTH*4
+
+        @@linewidth = 1
+
+        def Drawable.set_linewidth( linewidth )
+            @@linewidth = linewidth
+        end
+
+        def Drawable.linewidth
+            @@linewidth
+        end
+
+        def dotsize
+            @@linewidth*4
+        end
+
 
         self.property( :unit, :linewidth, :linestyle, :font, :fontsize, :linecolor, :fillcolor )
 
@@ -1015,7 +1030,8 @@ module Sivigi
 
             @unit = UNIT
 
-            @linewidth = LINEWIDTH
+#            @linewidth = LINEWIDTH
+            @linewidth = @@linewidth
 
             @font = "Lohit"
             # @font = "Arial"
@@ -1159,7 +1175,7 @@ module Sivigi
 
         attr_reader :gap
 
-        self.property_set( :pos, :size )
+        self.property_set( :pos, :size, :packpos )
 
         # Create Group container and open it (for drawables).
         def self.create( &blk )
@@ -1195,6 +1211,7 @@ module Sivigi
             containerSetup
             @pack = nil
             @gap = 0
+            @packpos = Pos.ini( 0, 0 )
         end
 
         # Recursively fix positions.
@@ -1245,7 +1262,7 @@ module Sivigi
             if @items.length >= 2
                 @items[-2]
             else
-                self
+                nil
             end
         end
 
@@ -1486,15 +1503,15 @@ module Sivigi
 
         # Pack box (with gap). Default gap value from container.
         def pack( gap = @container.gap )
-            prev = @container.prev
+            prev = @container.packpos
             dir = @container.dir
-            x = prev.pos.xnow + @container.dirgap( gap ).xnow
-            y = prev.pos.ynow + @container.dirgap( gap ).ynow
+            x = prev.xnow + @container.dirgap( gap ).xnow
+            y = prev.ynow + @container.dirgap( gap ).ynow
             case dir
-            when :u; y -= ( prev.half( dir ) + self.half( dir ) )
-            when :d; y += ( prev.half( dir ) + self.half( dir ) )
-            when :l; x -= ( prev.half( dir ) + self.half( dir ) )
-            when :r; x += ( prev.half( dir ) + self.half( dir ) )
+            when :u; y -= ( self.half( dir ) ); prev.ysub( size.y )
+            when :d; y += ( self.half( dir ) ); prev.yadd( size.y )
+            when :l; x -= ( self.half( dir ) ); prev.xsub( size.x )
+            when :r; x += ( self.half( dir ) ); prev.xadd( size.x )
             end
             pos x, y
         end
@@ -1833,8 +1850,8 @@ module Sivigi
         end
 
 
-        # Create Polyline with specified Pos. Either paired x,y in Array
-        # or and flat list of alternating x and y.
+        # Create Polyline with specified Pos. Either poses, paired x,y
+        # in Array or and flat list of alternating x and y.
         def spec( *args )
 
             if args[0].kind_of? Array
@@ -2279,7 +2296,7 @@ module Sivigi
     class Dot < Circle
 
         def Dot.spec( pos )
-            super( pos, DOTSIZE )
+            super( pos, dotsize )
         end
 
         def initialize
